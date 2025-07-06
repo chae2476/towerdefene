@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ultimate Tower Defense (JS 버전)</title>
+  <style>
+    body {
+      margin: 0;
+      background-color: #32323c;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      user-select: none;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+      color: white;
+    }
+    canvas {
+      border: 2px solid black;
+      background-color: #32323c;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="1000" height="600"></canvas>
+
+  <script>
+    function init() {
+      const canvas = document.getElementById('gameCanvas');
+      const ctx = canvas.getContext('2d');
+      const WIDTH = canvas.width;
+      const HEIGHT = canvas.height;
+      const CELLSIZE = 40;
+      const GRIDCOLS = Math.floor(WIDTH / CELLSIZE);
+      const GRIDROWS = Math.floor(HEIGHT / CELLSIZE);
+
+      const WHITE = 'rgb(245, 245, 245)';
+      const BLACK = 'rgb(30, 30, 30)';
+      const BGCOLOR = 'rgb(50, 50, 60)';
+      const PATHCOLOR = 'rgb(200, 200, 200)';
+      const RED = 'rgb(220, 50, 50)';
+      const GREEN = 'rgb(50, 220, 50)';
+      const BLUE = 'rgb(50, 50, 220)';
+      const YELLOW = 'rgb(220, 220, 50)';
+      const ORANGE = 'rgb(220, 140, 50)';
+      const DARKRED = 'rgb(180, 30, 30)';
+      const CYAN = 'rgb(50, 220, 220)';
+      const PURPLE = 'rgb(180, 50, 180)';
+      const GRAY = 'rgb(100, 100, 100)';
+
+      function drawText(text, font, color, x, y) {
+        ctx.font = font;
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+      }
+
+      let STATEINTRO = -1;
+      let STATESTAGESELECT = 0;
+      let STATEPLAYING = 1;
+      let MAXSTAGE = 50;
+      let WAVESPERSTAGE = 15;
+
+      const MAPPATHS = [
+        [{x:0,y:200},{x:200,y:200},{x:200,y:400},{x:400,y:400},{x:400,y:150},{x:WIDTH,y:150}],
+        [{x:0,y:250},{x:250,y:250},{x:250,y:450},{x:500,y:450},{x:500,y:100},{x:WIDTH,y:100}],
+        [{x:0,y:300},{x:300,y:300},{x:300,y:500},{x:600,y:500},{x:600,y:200},{x:WIDTH,y:200}],
+        [{x:0,y:350},{x:350,y:350},{x:350,y:550},{x:700,y:550},{x:700,y:250},{x:WIDTH,y:250}],
+        [{x:0,y:400},{x:400,y:400},{x:400,y:580},{x:800,y:580},{x:800,y:300},{x:WIDTH,y:300}],
+      ];
+
+      const UNITTYPEINFO = {
+        normal: {cost:50, damage:25, range:100, cooldown:25, color:BLUE, sellpricefactor:0.5, name:'Normal'},
+        sniper: {cost:100, damage:50, range:250, cooldown:60, color:GREEN, sellpricefactor:0.5, name:'Sniper'},
+        aoe: {cost:120, damage:20, range:100, cooldown:90, color:CYAN, sellpricefactor:0.5, name:'AOE'},
+        minigunner: {cost:100, damage:5, range:100, cooldown:5, color:GRAY, sellpricefactor:0.5, name:'MiniGunner'},
+        bomb: {cost:250, damage:80, range:100, cooldown:150, color:DARKRED, sellpricefactor:0.5, name:'Bomb'},
+      };
+
+      const UNITUNLOCKORDER = [
+        ['normal'],
+        ['normal','sniper'],
+        ['normal','sniper','aoe'],
+        ['normal','sniper','aoe','minigunner'],
+        ['normal','sniper','aoe','minigunner','bomb'],
+      ];
+
+      let gridblocked = Array(GRIDROWS).fill(null).map(() => Array(GRIDCOLS).fill(false));
+
+      function markpathongrid(path) {
+        for(let i=0; i<path.length; i++) {
+          const px = path[i].x;
+          const py = path[i].y;
+          const c = Math.floor(px / CELLSIZE);
+          const r = Math.floor(py / CELLSIZE);
+          if (0 <= r && r < GRIDROWS && 0 <= c && c < GRIDCOLS) {
+            gridblocked[r][c] = true;
+          }
+        }
+      }
+
+      function canplacetower(r, c) {
+        if (r < 0 || c < 0 || r >= GRIDROWS || c >= GRIDCOLS) return false;
+        if (gridblocked[r][c]) return false;
+        return true;
+      }
+
+      class Enemy {
+        constructor(path, wave, hpbuff=0, isboss=false) {
+          this.path = path;
+          this.x = path[0].x;
+          this.y = path[0].y;
+          this.pathindex = 0;
+          this.isboss = isboss;
+          let basehp = 200 + wave * 50;
+          this.hp = basehp + hpbuff;
+          if(isboss){
+            this.hp = 5;
+            this.radius = 25;
+            this.color = DARKRED;
+            this.reward = 100;
+          } else {
+            this.radius = 15;
+            this.color = RED;
+            this.reward = 15;
+          }
+          this.maxhp = this.hp;
+          this.speed = isboss ? 0.7 : 1.0;
+          this.slowtimer = 0;
+
+          // 회복 관련 변수 추가
+          this.healCooldownMax = Math.max(120, 420 - wave * 20); // 쿨타임 점점 짧아짐, 최소 20프레임
+          this.healCooldown = this.healCooldownMax;
+          this.healRate = 0.1 + wave * 0.1;  // 회복 비율 점점 증가 (전체 체력 대비)
+        }
+        move(speedmultiplier=1) {
+          if(this.pathindex + 1 >= this.path.length) return false;
+          let spd = this.speed * speedmultiplier;
+          if(this.slowtimer > 0) {
+            spd = 0.6;
+            this.slowtimer -= 1;
+          }
+          let tx = this.path[this.pathindex + 1].x;
+          let ty = this.path[this.pathindex + 1].y;
+          let dx = tx - this.x;
+          let dy = ty - this.y;
+          let dist = Math.hypot(dx, dy);
+          if(dist < spd) {
+            this.x = tx;
+            this.y = ty;
+            this.pathindex += 1;
+          } else {
+            this.x += spd * dx / dist;
+            this.y += spd * dy / dist;
+          }
+
+          // 회복 쿨타임 감소 및 회복 처리
+          if(this.healCooldown > 0) {
+            this.healCooldown--;
+          } else {
+            this.hp += this.maxhp * this.healRate;
+            if(this.hp > this.maxhp) this.hp = this.maxhp;
+            this.healCooldown = this.healCooldownMax;
+          }
+
+          return true;
+        }
+        draw(win) {
+          win.beginPath();
+          win.arc(this.x, this.y, this.radius, 0, 2 * Math.PI);
+          win.fillStyle = this.color;
+          win.fill();
+
+          win.fillStyle = RED;
+          win.fillRect(this.x - this.radius, this.y - this.radius - 8, this.radius * 2, 5);
+          win.fillStyle = GREEN;
+          win.fillRect(this.x - this.radius, this.y - this.radius - 8, this.radius * 2 * (this.hp / this.maxhp), 5);
+
+          if(this.isboss) {
+            drawText(`HP: ${Math.floor(this.hp)}`, '20px Arial', WHITE, this.x - 20, this.y - this.radius - 30);
+          }
+        }
+      }
+
+      class Bullet {
+        constructor(x, y, target, damage, color) {
+          this.x = x;
+          this.y = y;
+          this.target = target;
+          this.damage = damage;
+          this.speed = 15;
+          this.color = color;
+          this.alive = true;
+        }
+        move() {
+          let dx = this.target.x - this.x;
+          let dy = this.target.y - this.y;
+          let dist = Math.hypot(dx, dy);
+          if(dist < this.speed || this.target.hp <= 0) {
+            this.target.hp -= this.damage;
+            this.alive = false;
+            return;
+          }
+          this.x += this.speed * dx / dist;
+          this.y += this.speed * dy / dist;
+        }
+        draw(win) {
+          win.beginPath();
+          win.arc(this.x, this.y, 5, 0, 2 * Math.PI);
+          win.fillStyle = this.color;
+          win.fill();
+        }
+      }
+
+      class Tower {
+        constructor(r, c, towertype) {
+          this.r = r;
+          this.c = c;
+          this.x = c * CELLSIZE + CELLSIZE/2;
+          this.y = r * CELLSIZE + CELLSIZE/2;
+          this.type = towertype;
+          let info = UNITTYPEINFO[towertype];
+          this.damage = info.damage;
+          this.range = info.range;
+          this.cooldownmax = info.cooldown;
+          this.cooldown = 0;
+          this.color = info.color;
+          this.cost = info.cost;
+          this.sellpricefactor = info.sellpricefactor;
+          this.level = 1;
+          this.name = info.name;
+          this.selected = false;
+        }
+        attack(enemies, bullets) {
+          if(this.cooldown > 0) {
+            this.cooldown -= 1;
+            return;
+          }
+          const rangeSq = this.range * this.range;
+          for(let i=0; i<enemies.length; i++) {
+            let e = enemies[i];
+            let dx = e.x - this.x;
+            let dy = e.y - this.y;
+            let distSq = dx*dx + dy*dy;
+            if(distSq <= rangeSq) {
+              bullets.push(new Bullet(this.x, this.y, e, this.damage, this.color));
+              this.cooldown = this.cooldownmax;
+              break;
+            }
+          }
+        }
+        draw(win) {
+          let rect = {x: this.c * CELLSIZE + 4, y: this.r * CELLSIZE + 4, width: CELLSIZE - 8, height: CELLSIZE - 8};
+          win.fillStyle = this.color;
+          win.fillRect(rect.x, rect.y, rect.width, rect.height);
+          if(this.selected) {
+            win.beginPath();
+            win.arc(this.x, this.y, this.range, 0, 2 * Math.PI);
+            win.strokeStyle = WHITE;
+            win.lineWidth = 2;
+            win.stroke();
+          }
+        }
+        upgrade() {
+          if(this.level >= 20) return false;
+          this.level++;
+          this.damage = Math.floor(this.damage * 1.15);
+          this.range = Math.floor(this.range * 1.05);
+          this.cooldownmax = Math.max(5, Math.floor(this.cooldownmax * 0.9));
+          this.cost = Math.floor(this.cost * 1.5);
+          return true;
+        }
+      }
+
+      class Button {
+        constructor(x, y, w, h, color, text) {
+          this.rect = {x:x, y:y, width:w, height:h};
+          this.color = color;
+          this.text = text;
+        }
+        draw(win, selected=false) {
+          let c = !selected ? this.color : 'rgb(255,255,255)';
+          win.fillStyle = c;
+          win.fillRect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
+          win.strokeStyle = BLACK;
+          win.lineWidth = 2;
+          win.strokeRect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
+          let textColor = !selected ? BLACK : 'rgb(0,0,0)';
+          drawText(this.text, '20px Arial', textColor, this.rect.x + 10, this.rect.y + 30);
+        }
+        isclicked(pos) {
+          return (pos.x > this.rect.x && pos.x < this.rect.x + this.rect.width &&
+                  pos.y > this.rect.y && pos.y < this.rect.y + this.rect.height);
+        }
+      }
+
+      function drawgrid(win) {
+        for(let r=0; r<GRIDROWS; r++) {
+          for(let c=0; c<GRIDCOLS; c++) {
+            let color = gridblocked[r][c] ? PATHCOLOR : BGCOLOR;
+            let rect = {x:c*CELLSIZE, y:r*CELLSIZE, width:CELLSIZE, height:CELLSIZE};
+            win.fillStyle = color;
+            win.fillRect(rect.x, rect.y, rect.width, rect.height);
+            win.strokeStyle = BLACK;
+            win.lineWidth = 1;
+            win.strokeRect(rect.x, rect.y, rect.width, rect.height);
+          }
+        }
+      }
+
+      function drawpath(win, path) {
+        win.strokeStyle = PATHCOLOR;
+        win.lineWidth = 8;
+        win.beginPath();
+        win.moveTo(path[0].x, path[0].y);
+        for(let i=1; i<path.length; i++) {
+          win.lineTo(path[i].x, path[i].y);
+        }
+        win.stroke();
+      }
+
+      function drawbottomunitbuttons(win, unlockedunits, selectedtype) {
+        let y = HEIGHT - 60;
+        let x = 20;
+        for(let i=0; i<unlockedunits.length; i++) {
+          let ut = unlockedunits[i];
+          let rect = {x: x + i*90, y: y, width: 80, height: 40};
+          win.fillStyle = UNITTYPEINFO[ut].color;
+          win.fillRect(rect.x, rect.y, rect.width, rect.height);
+          if(selectedtype === ut) {
+            win.strokeStyle = WHITE;
+            win.lineWidth = 3;
+            win.strokeRect(rect.x, rect.y, rect.width, rect.height);
+          }
+          let text = `${i+1}. ${UNITTYPEINFO[ut].name}`;
+          drawText(text, '20px Arial', BLACK, rect.x + 5, rect.y + 30);
+        }
+      }
+
+      function drawspeedbuttons(win, selectedspeed) {
+        let x = WIDTH - 200;
+        let y = HEIGHT - 60;
+        let sizes = [60, 60, 60];
+        let labels = ['>', '>>', '>>>'];
+        let colors = [GRAY, GRAY, GRAY];
+        colors[selectedspeed - 1] = YELLOW;
+        let buttons = [];
+        for(let i=0; i<3; i++) {
+          let rect = {x: x + i*65, y: y, width: sizes[i], height: 40};
+          win.fillStyle = colors[i];
+          win.fillRect(rect.x, rect.y, rect.width, rect.height);
+          win.strokeStyle = BLACK;
+          win.lineWidth = 2;
+          win.strokeRect(rect.x, rect.y, rect.width, rect.height);
+          let label = labels[i];
+          drawText(label, '20px Arial', BLACK, rect.x + rect.width/2 - 5, rect.y + rect.height/2 + 5);
+          buttons.push(rect);
+        }
+        return buttons;
+      }
+
+      function maingame(stagenum) {
+        gridblocked = Array(GRIDROWS).fill(null).map(() => Array(GRIDCOLS).fill(false));
+        let pathgroup = (stagenum / 5) % MAPPATHS.length;
+        let path = MAPPATHS[Math.floor(pathgroup)];
+        markpathongrid(path);
+
+        let lives = 20;
+        let money = 200;
+        let wave = 0;
+        let enemies = [];
+        let towers = [];
+        let bullets = [];
+        let selectedtower = null;
+        let unlockedunits = UNITUNLOCKORDER[Math.min(Math.floor(stagenum / 5), UNITUNLOCKORDER.length - 1)];
+        let selectedtype = unlockedunits[0];
+        let waveinprogress = false;
+        let spawntimer = 0;
+        let enemiestospawn = 0;
+        let stagecleared = false;
+        let upgradebutton = new Button(WIDTH - 180, HEIGHT - 70, 140, 50, GRAY, "Upgrade Tower");
+        let sellbutton = new Button(WIDTH - 180, HEIGHT - 130, 140, 50, 'rgb(180, 50, 50)', "Sell Tower");
+        let enemyhpbuff = stagenum * 5;
+        let speedmultiplier = 1;
+        let running = true;
+
+        let speedbuttons = [];
+
+        function gameLoop() {
+          if(!running) return;
+          ctx.fillStyle = BGCOLOR;
+          ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+          drawgrid(ctx);
+          drawpath(ctx, path);
+
+          for(let t of towers){
+            t.selected = (t === selectedtower);
+            t.draw(ctx);
+          }
+          for(let e of enemies){
+            e.draw(ctx);
+          }
+          for(let b of bullets){
+            b.draw(ctx);
+          }
+
+          // 게임 상태 텍스트
+          drawText(`Stage: ${stagenum+1}`, '24px Arial', WHITE, 20, 30);
+          drawText(`Wave: ${wave+1} / ${WAVESPERSTAGE}`, '24px Arial', WHITE, 20, 60);
+          drawText(`Lives: ${lives}`, '24px Arial', WHITE, 20, 90);
+          drawText(`Money: ${money}`, '24px Arial', WHITE, 20, 120);
+
+          drawbottomunitbuttons(ctx, unlockedunits, selectedtype);
+          speedbuttons = drawspeedbuttons(ctx, speedmultiplier);
+
+          upgradebutton.draw(ctx, selectedtower !== null);
+          sellbutton.draw(ctx, selectedtower !== null);
+
+          // 적 스폰 및 이동 처리
+          if(waveinprogress) {
+            spawntimer--;
+            if(spawntimer <= 0 && enemiestospawn > 0) {
+              // 적 생성: 보스 5웨이브마다 출현
+              let isboss = ((wave + 100) % 5 === 0) && (enemiestospawn === 1);
+              let e = new Enemy(path, wave + stagenum * WAVESPERSTAGE, enemyhpbuff, isboss);
+              enemies.push(e);
+              enemiestospawn--;
+              spawntimer = 30;
+            }
+            if(enemiestospawn <= 0 && enemies.length === 0) {
+              waveinprogress = false;
+              wave++;
+              if(wave >= WAVESPERSTAGE) {
+                stagecleared = true;
+              }
+            }
+          } else {
+            if(!stagecleared) {
+              if(wave < WAVESPERSTAGE) {
+                waveinprogress = true;
+                enemiestospawn = 5 + wave * 2;
+                spawntimer = 0;
+              }
+            }
+          }
+
+          // 적 이동 및 제거
+          for(let i = enemies.length - 1; i >= 0; i--) {
+            let e = enemies[i];
+            let alive = e.move(speedmultiplier);
+            if(!alive) {
+              lives--;
+              enemies.splice(i, 1);
+              if(lives <= 0) {
+                alert('게임 오버!');
+                running = false;
+              }
+            } else if(e.hp <= 0) {
+              money += e.reward;
+              enemies.splice(i, 1);
+            }
+          }
+
+          // 타워 공격
+          for(let t of towers) {
+            t.attack(enemies, bullets);
+          }
+
+          // 총알 이동 및 제거
+          for(let i = bullets.length - 1; i >= 0; i--) {
+            let b = bullets[i];
+            if(b.alive) {
+              b.move();
+            } else {
+              bullets.splice(i, 1);
+            }
+          }
+
+          requestAnimationFrame(gameLoop);
+        }
+
+        canvas.onclick = function(e) {
+          if(!running) return;
+          let rect = canvas.getBoundingClientRect();
+          let mx = e.clientX - rect.left;
+          let my = e.clientY - rect.top;
+
+          // 하단 버튼 클릭 검사 (유닛 선택)
+          let ybtn = HEIGHT - 60;
+          let xbtn = 20;
+          for(let i=0; i<unlockedunits.length; i++) {
+            let ut = unlockedunits[i];
+            if(mx > xbtn + i*90 && mx < xbtn + i*90 + 80 && my > ybtn && my < ybtn + 40) {
+              selectedtype = ut;
+              return;
+            }
+          }
+          // 속도 버튼 클릭 검사
+          for(let i=0; i<speedbuttons.length; i++) {
+            let b = speedbuttons[i];
+            if(mx > b.x && mx < b.x + b.width && my > b.y && my < b.y + b.height) {
+              speedmultiplier = i+1;
+              return;
+            }
+          }
+
+          // 업그레이드 버튼 클릭
+          if(upgradebutton.isclicked({x: mx, y: my}) && selectedtower) {
+            let upcost = Math.floor(selectedtower.cost * 0.75);
+            if(money >= upcost) {
+              let upgraded = selectedtower.upgrade();
+              if(upgraded) {
+                money -= upcost;
+              }
+            }
+            return;
+          }
+          // 판매 버튼 클릭
+          if(sellbutton.isclicked({x: mx, y: my}) && selectedtower) {
+            money += Math.floor(selectedtower.cost * selectedtower.sellpricefactor);
+            towers = towers.filter(t => t !== selectedtower);
+            selectedtower = null;
+            return;
+          }
+
+          // 타워 선택 또는 설치
+          let clickedOnTower = false;
+          for(let t of towers) {
+            let dx = mx - t.x;
+            let dy = my - t.y;
+            if(dx*dx + dy*dy <= CELLSIZE * CELLSIZE / 4) {
+              selectedtower = t;
+              clickedOnTower = true;
+              return;
+            }
+          }
+          if(clickedOnTower === false) {
+            // 설치 위치 계산
+            let c = Math.floor(mx / CELLSIZE);
+            let r = Math.floor(my / CELLSIZE);
+            if(canplacetower(r, c)) {
+              let cost = UNITTYPEINFO[selectedtype].cost;
+              if(money >= cost) {
+                let newTower = new Tower(r, c, selectedtype);
+                towers.push(newTower);
+                money -= cost;
+              }
+            }
+            selectedtower = null;
+          }
+        };
+
+        gameLoop();
+      }
+
+      // 게임 시작
+      maingame(0);
+    }
+
+    window.onload = init;
+  </script>
+</body>
+</html>
